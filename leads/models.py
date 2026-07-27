@@ -82,6 +82,8 @@ class Lead(models.Model):
         CompanyDetails, on_delete=models.SET_NULL, blank=True, null=True,
         related_name="leads", verbose_name="Linked Client"
     )
+    
+    source_account = models.CharField(max_length=50, blank=True)
 
     def __str__(self):
         return self.subject
