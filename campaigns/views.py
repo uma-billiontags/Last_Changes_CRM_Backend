@@ -10,8 +10,11 @@ import json
 from django.db import transaction  # imports Django transaction management system.
 from django.db.models import Prefetch
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
-from .models import LineItem, Creative, ThirdPartyCreative, Campaign
+from .models import LineItem, Creative, ThirdPartyCreative, Campaign, generate_line_item_id
 from company_details.models import CompanyDetails   # ← add this import
+from django.http import JsonResponse
+from django.core.mail import EmailMultiAlternatives
+from django.conf import settings
 
 # Create your views here.
 
@@ -22,6 +25,8 @@ def parse_date(date_str):
         return None
     return datetime.fromisoformat(date_str.replace("Z", "")).date()
 
+from tasks.views import auto_assign_campaign_tasks   # ← ADD THIS IMPORT
+from .io_utils import generate_io_for_campaign   # ← ADD
 
 @api_view(["POST"])
 @parser_classes([MultiPartParser, FormParser])  # it allows file upload, formdata. (without this file uploads won't work)
@@ -29,7 +34,7 @@ def create_campaign(request):
 
     client_id = request.data.get(
         "client"
-    )  # get the client id CLT-2026-00001 from frontend
+    )  
     if not client_id:
         return Response(
             {"error": "client is required"}, status=400
@@ -53,7 +58,12 @@ def create_campaign(request):
                 client=client,
                 ticket_id=request.data.get("ticket_id") or None
             )  
-
+            if campaign.ticket_id:                          # ← ADD THIS
+                auto_assign_campaign_tasks(campaign.ticket_id)   # ← ADD THIS
+                
+            generate_io_for_campaign(campaign)   # ← ADD — no ticket_id guard needed,
+                                                  # every campaign gets an IO regardless
+                                                  
             try:
                 line_items_data = json.loads(
                     request.data.get("line_items", "[]")
@@ -69,18 +79,16 @@ def create_campaign(request):
                 line_items_data
             ):  # Loop through every line item one by one. (eg: i=0, li=first line item)
 
-                line_item_id = li.get(
-                    "line_item_id"
-                )  # get the line item id (LIUSER0001)
+                line_item_id = generate_line_item_id()
 
                 if not line_item_id:  # If no ID, skip that line item.
                     continue
 
                 line_item, _ = (
                     LineItem.objects.update_or_create(  # Search LineItem using line_item_id (if line item data already exist (update) or (create))
+                        campaign=campaign,
                         line_item_id=line_item_id,
                         defaults={
-                            "campaign": campaign,
                             "line_item_name": li.get("line_item_name"),
                             "ethnicity": li.get("ethnicity", []),
                             "start_date": parse_date(li.get("start_date")),
@@ -215,3 +223,128 @@ def download_backup_image(request, thirdparty_id):
     return FileResponse(
         open(file_path, "rb"), as_attachment=True, filename=thirdparty.backup_image.name
     )
+
+# ------------------------IO Function-------------------------------------
+
+from django.http import FileResponse
+from .models import InsertionOrder
+
+@api_view(["GET"])
+def get_io_list(request):
+    campaigns = Campaign.objects.select_related("client", "insertion_order").prefetch_related("line_items")
+    data = []
+    for c in campaigns:
+        io = getattr(c, "insertion_order", None)
+        data.append({
+            "ticket_id": c.ticket_id,              # ← replaces campaign_id in the response
+            "campaign_name": c.campaign_name,
+            "client_name": str(c.client) if c.client else "",
+            "start_date": str(c.start_date) if c.start_date else "",
+            "end_date": str(c.end_date) if c.end_date else "",
+            "campaign_type": c.campaign_type or "",
+            "line_items_count": c.line_items.count(),
+            "io_id": io.io_id if io else None,
+            "pdf_generated": bool(io and io.pdf_file),
+            "created_at": c.created_at.isoformat() if c.created_at else "",
+        })
+    return Response(data)
+
+
+@api_view(["GET"])
+def download_io_pdf(request, ticket_id):
+    try:
+        io_obj = InsertionOrder.objects.get(campaign__ticket_id=ticket_id)
+    except InsertionOrder.DoesNotExist:
+        return Response({"error": "IO not found"}, status=404)
+    if not io_obj.pdf_file:
+        return Response({"error": "PDF not generated yet"}, status=404)
+    response = FileResponse(io_obj.pdf_file.open("rb"), content_type="application/pdf")
+    response["Content-Disposition"] = f'attachment; filename="{io_obj.io_id}.pdf"'
+    return response
+
+@api_view(["POST"])
+def generate_io_pdf(request, ticket_id):
+    try:
+        campaign = Campaign.objects.get(ticket_id=ticket_id)
+    except Campaign.DoesNotExist:
+        return Response({"error": "Campaign not found"}, status=404)
+    io_id = generate_io_for_campaign(campaign)
+    return Response({"message": "IO PDF generated", "io_id": io_id}, status=200)
+
+# ------------------------Send Email-------------------------------------
+
+# campaigns/views.py (or wherever your IO views live)
+
+def io_send_email_preview(request, ticket_id):
+    campaign = get_object_or_404(Campaign, ticket_id=ticket_id)
+    io_obj = getattr(campaign, "insertion_order", None)  # or however IO relates
+    if not io_obj:
+        return JsonResponse({"status": False, "message": "No Insertion Order found for this campaign."})
+    client = campaign.client  # CompanyDetails
+
+    to_emails = [e.strip() for e in (client.default_email_send_to or "").split(",") if e.strip()]
+    cc_emails = [e.strip() for e in (client.default_email_send_cc or "").split(",") if e.strip()]
+
+    if not to_emails:
+        return JsonResponse({
+            "status": False,
+            "message": f"No 'Default Email To' configured for {client.name}.",
+            "needs_email_setup": True,
+            "company_id": client.id,
+        })
+
+    subject = f"Insertion Order {io_obj.io_id} - {campaign.campaign_name}"
+
+    return JsonResponse({
+        "status": True,
+        "io_id": io_obj.io_id,
+        "ticket_id": ticket_id,
+        "campaign_name": campaign.campaign_name,
+        "client_name": client.name,
+        "subject": subject,
+        "to": to_emails,
+        "cc": cc_emails,
+        "attachments": [f"{io_obj.io_id}_{ticket_id}.pdf"],
+    })
+
+
+from django.views.decorators.csrf import csrf_exempt
+
+@csrf_exempt
+def io_send_email(request, ticket_id):
+    if request.method != "POST":
+        return JsonResponse({"status": False, "message": "Invalid request method."})
+
+    campaign = get_object_or_404(Campaign, ticket_id=ticket_id)
+    io_obj = getattr(campaign, "insertion_order", None)
+    if not io_obj:
+        return JsonResponse({"status": False, "message": "No Insertion Order found for this campaign."})
+    client = campaign.client
+
+    to_emails = [e.strip() for e in (client.default_email_send_to or "").split(",") if e.strip()]
+    cc_emails = [e.strip() for e in (client.default_email_send_cc or "").split(",") if e.strip()]
+    if not to_emails:
+        return JsonResponse({"status": False, "message": "No 'Default Email To' configured."})
+
+    subject = request.POST.get("subject") or f"Insertion Order {io_obj.io_id}"
+    body_html = request.POST.get("email_body") or f"Please find attached the Insertion Order {io_obj.io_id}."
+
+    email = EmailMultiAlternatives(
+        subject=subject, body="", from_email=settings.DEFAULT_FROM_EMAIL,
+        to=to_emails, cc=cc_emails if cc_emails else None,
+    )
+    email.attach_alternative(body_html, "text/html")
+
+    try:
+        if not io_obj.pdf_file:
+            return JsonResponse({"status": False, "message": "IO PDF not yet generated."})
+        email.attach(
+            f"{io_obj.io_id}_{ticket_id}.pdf",
+            io_obj.pdf_file.read(),
+            "application/pdf",
+        )
+        email.send(fail_silently=False)
+    except Exception as e:
+        return JsonResponse({"status": False, "message": f"Failed to send email: {e}"})
+
+    return JsonResponse({"status": True, "message": f"Email sent to {', '.join(to_emails)}"})

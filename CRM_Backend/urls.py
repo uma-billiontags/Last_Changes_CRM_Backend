@@ -9,7 +9,9 @@ urlpatterns = [
     path('leads/', include('leads.urls')),
     path('categories/', include('categories.urls')),
     path('tasks/', include('tasks.urls')),
-    path('campaigns/', include('campaigns.urls'))
+    path('campaigns/', include('campaigns.urls')),
+    path('reports/', include('reports.urls')),  
+    path('invoice/', include('invoice.urls')),
 ]
 
 if settings.DEBUG:

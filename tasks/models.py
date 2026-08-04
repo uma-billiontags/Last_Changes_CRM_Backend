@@ -50,3 +50,17 @@ class TaskAssignment(models.Model):
 
     def __str__(self):
         return f"{self.ticket_id} → {self.task_type} → {self.assigned_to_name} ({self.status})"
+    
+    
+class AutoAssignRotation(models.Model):
+    """Tracks the last person auto-assigned for a (department, role) pair,
+    so the NEXT campaign's auto-assignment picks up where the last one left off —
+    independent of any single ticket's own reassignment chain."""
+    department = models.ForeignKey(Department, on_delete=models.CASCADE, related_name="auto_assign_rotations")
+    role = models.ForeignKey(Role, on_delete=models.CASCADE, related_name="auto_assign_rotations")
+    last_assigned_user = models.ForeignKey(UserCredential, on_delete=models.SET_NULL, null=True, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "tbl_auto_assign_rotation"
+        unique_together = ("department", "role")

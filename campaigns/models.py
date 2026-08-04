@@ -2,7 +2,7 @@ from django.db import models
 from company_details.models import CompanyDetails
 
 class Campaign(models.Model):
-
+ 
     client = models.ForeignKey(CompanyDetails, on_delete=models.CASCADE, related_name="campaigns")  # ← renamed from client_id
     ticket_id = models.CharField(max_length=20, blank=True, null=True, db_index=True)  # ← ADD THIS
 
@@ -31,10 +31,28 @@ class Campaign(models.Model):
         return f"{self.campaign_name}"   # ← fixed, was self.campaign_id which doesn't exist
 # ==== Add Line Item ====
 
+def generate_line_item_id(prefix="LILEAD"):
+    """Sequential, collision-proof: LILEAD001, LILEAD002, ... across ALL campaigns."""
+    with transaction.atomic():
+        last = (
+            LineItem.objects
+            .filter(line_item_id__startswith=prefix)
+            .exclude(line_item_id__isnull=True).exclude(line_item_id="")
+            .select_for_update()
+            .order_by("-line_item_id")
+            .first()
+        )
+        try:
+            last_num = int(last.line_item_id.replace(prefix, "")) if last else 0
+        except ValueError:
+            last_num = 0
+        new_num = last_num + 1
+        return f"{prefix}{str(new_num).zfill(3)}"
+    
 class LineItem(models.Model):
     campaign = models.ForeignKey(Campaign, on_delete=models.CASCADE, related_name='line_items') # One campaign have multiple line items (,null=True, blank=True)
 
-    line_item_id = models.CharField(max_length=50, unique=True)
+    line_item_id = models.CharField(max_length=50, unique=True)  # ← add unique=True
     line_item_name = models.CharField(max_length=300)
 
     # Better than comma-separated
@@ -109,6 +127,7 @@ class LineItem(models.Model):
         db_table = "tbl_line_items"
         verbose_name = "Line item"
         verbose_name_plural = 'Line items'
+        unique_together = ("campaign", "line_item_id")   # ← add this
 
     #  validation
     def clean(self):
@@ -190,3 +209,30 @@ class ThirdPartyCreative(models.Model):
     def __str__(self):
         return f"ThirdPartyCreative ({self.line_item.line_item_name})"
 
+from django.db import transaction
+
+class InsertionOrder(models.Model):
+    campaign = models.OneToOneField(Campaign, on_delete=models.CASCADE, related_name="insertion_order")
+    io_id = models.CharField(max_length=20, unique=True, editable=False)
+    pdf_file = models.FileField(upload_to="insertion_orders/", blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "tbl_insertion_order"
+
+    def __str__(self):
+        return f"{self.io_id} — {self.campaign.campaign_name}"
+
+
+def generate_io_id():
+    """Mirrors leads.models.generate_ticket_id — sequential IO0001, IO0002, ..."""
+    with transaction.atomic():
+        last = (
+            InsertionOrder.objects
+            .exclude(io_id__isnull=True).exclude(io_id="")
+            .select_for_update()
+            .order_by("-io_id")
+            .first()
+        )
+        new_num = int(last.io_id.replace("IO", "")) + 1 if last else 1
+        return f"IO{str(new_num).zfill(4)}"

@@ -480,3 +480,67 @@ def get_status_report(request):
         })
 
     return JsonResponse(data, safe=False)
+
+import re
+from django.utils import timezone
+from categories.models import Department, Role
+from .models import TaskAssignment, AutoAssignRotation
+
+AUTO_ASSIGN_DEADLINE_HOURS = 0.1667  # 10 minutes — TEMP, change here later
+
+AUTO_ASSIGN_CONFIG = {
+    "Campaign Ops": "Account Director",
+    "Creative Ops": "Account Director",
+    "Ad Ops": "Account Director",
+}
+
+def department_to_task_type(title: str) -> str:
+    """Mirrors the frontend's departmentToTaskType() exactly, so task_type
+    slugs match what All_Campaigns.tsx looks up in assignment history."""
+    slug = re.sub(r'[^a-z0-9]+', '_', title.strip().lower())
+    return slug.strip('_')
+
+
+def auto_assign_campaign_tasks(ticket_id):
+    """Call this once, right after a Campaign is created and has a ticket_id.
+    Auto-assigns Campaign Ops / Creative Ops / Ad Ops via round robin.
+    Never raises — a misconfigured role or an all-busy team just gets skipped,
+    so it can't block campaign creation."""
+    for dept_title, role_title in AUTO_ASSIGN_CONFIG.items():
+        try:
+            department = Department.objects.get(title=dept_title, is_active=True)
+            role = Role.objects.get(department=department, title=role_title, is_active=True)
+        except (Department.DoesNotExist, Role.DoesNotExist):
+            continue
+
+        task_type = department_to_task_type(dept_title)
+
+        if get_current_assignment(ticket_id, task_type):
+            continue  # already has an assignment somehow — don't double-assign
+
+        rotation, _ = AutoAssignRotation.objects.get_or_create(department=department, role=role)
+
+        next_user = get_next_assignee(
+            role, rotation.last_assigned_user,
+            ticket_id=ticket_id, task_type=task_type,
+        )
+        if not next_user:
+            continue  # everyone in this role is at BUSY_THRESHOLD — leave unassigned
+
+        now = timezone.now()
+        TaskAssignment.objects.create(
+            ticket_id=ticket_id,
+            task_type=task_type,
+            department=department,
+            role=role,
+            assigned_to=next_user,
+            assigned_to_name=next_user.username,
+            assigned_by=None,  # system-triggered, like the overdue sweep
+            status="pending",
+            deadline_hours=AUTO_ASSIGN_DEADLINE_HOURS,
+            due_at=now + timezone.timedelta(hours=AUTO_ASSIGN_DEADLINE_HOURS),
+            notes="Auto-assigned on campaign creation — round robin",
+        )
+
+        rotation.last_assigned_user = next_user
+        rotation.save(update_fields=["last_assigned_user", "updated_at"])

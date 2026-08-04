@@ -104,20 +104,14 @@ from leads.gmail_service import get_gmail_service, GMAIL_ACCOUNTS
 
 
 class Command(BaseCommand):
-    help = "Sync Gmail messages (last 2 days) into the Lead table, across all configured accounts"
+    help = "Sync Gmail messages (last 2 days, inclusive of today) into the Lead table, across all configured accounts"
 
     def handle(self, *args, **options):
-        # ── Pull emails from the last 2 days (today - 2) ──
-        # two_days_ago_str = (date.today() - timedelta(days=2)).strftime('%Y/%m/%d')
-        # query = f"after:{two_days_ago_str}"
-        # ── Pull emails from the previous 2 complete days, excluding today ──
+        # ── Pull emails from 2 days ago through right now (inclusive of today) ──
         today = date.today()
         two_days_ago = today - timedelta(days=2)
 
-        query = (
-            f"after:{(two_days_ago - timedelta(days=1)).strftime('%Y/%m/%d')} "
-            f"before:{today.strftime('%Y/%m/%d')}"
-        )
+        query = f"after:{two_days_ago.strftime('%Y/%m/%d')}"
 
         total_saved = 0
         total_excluded = 0
@@ -227,6 +221,4 @@ It performs this process:
 11. Download attachments
 12. Save attachments
 13. Repeat for charulatham312
-
-
 '''
