@@ -162,7 +162,7 @@ class CompanyContacts(models.Model):
     
     name = models.CharField(max_length=120)
     phone = models.CharField(max_length=15, blank=True, null=True)
-    email = models.EmailField()
+    email = models.EmailField(unique=True)  # each contact person must have a unique email address
     designation = models.CharField(max_length=100)
     
     digital_signature = models.ImageField(upload_to="company-user-signature", blank=True, null=True)   # their signature image

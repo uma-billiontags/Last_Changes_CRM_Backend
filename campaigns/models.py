@@ -1,6 +1,36 @@
 from django.db import models
 from company_details.models import CompanyDetails
 
+
+# Added by me
+import re
+from django.db import transaction
+
+# Added by me
+def generate_line_item_id(prefix: str) -> str:
+    """
+    prefix is everything before the trailing digits, e.g. 'LILEAD' from 'LILEAD002'.
+    Locks and recomputes the next number atomically — guarantees uniqueness even
+    if multiple browser tabs submit near-simultaneously.
+    """
+    with transaction.atomic():
+        last = (
+            LineItem.objects
+            .select_for_update()
+            .filter(line_item_id__startswith=prefix)
+            .order_by('-line_item_id')
+            .first()
+        )
+        if last:
+            match = re.search(r'(\d+)$', last.line_item_id)
+            last_num = int(match.group(1)) if match else 0
+            new_num = last_num + 1
+        else:
+            new_num = 1
+        return f"{prefix}{str(new_num).zfill(3)}"
+
+
+
 class Campaign(models.Model):
  
     client = models.ForeignKey(CompanyDetails, on_delete=models.CASCADE, related_name="campaigns")  # ← renamed from client_id

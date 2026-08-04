@@ -16,7 +16,10 @@ from django.http import JsonResponse
 from django.core.mail import EmailMultiAlternatives
 from django.conf import settings
 
-# Create your views here.
+# Added by charu
+import re
+from .models import LineItem, Creative, ThirdPartyCreative, Campaign, generate_line_item_id
+
 
 # Creates a custom function to convert frontend date string into Python date.
 def parse_date(date_str):
@@ -74,40 +77,47 @@ def create_campaign(request):
             # =============================================
             # LOOP LINE ITEMS
             # =============================================
-
             for i, li in enumerate(
                 line_items_data
             ):  # Loop through every line item one by one. (eg: i=0, li=first line item)
 
-                line_item_id = generate_line_item_id()
 
-                if not line_item_id:  # If no ID, skip that line item.
+                # Added by me
+                raw_line_item_id = li.get("line_item_id")
+                if not raw_line_item_id:
                     continue
 
-                line_item, _ = (
-                    LineItem.objects.update_or_create(  # Search LineItem using line_item_id (if line item data already exist (update) or (create))
-                        campaign=campaign,
-                        line_item_id=line_item_id,
-                        defaults={
-                            "line_item_name": li.get("line_item_name"),
-                            "ethnicity": li.get("ethnicity", []),
-                            "start_date": parse_date(li.get("start_date")),
-                            "end_date": parse_date(li.get("end_date")),
-                            "ad_format": li.get("ad_format", []),
-                            "impressions": li.get("impressions") or None,
-                            "units": li.get("units") or None,
-                            "ctr": li.get("ctr") or None,
-                            "viewability": li.get("viewability") or None,
-                            "vcr": li.get("vcr") or None,
-                            "unit_cost": li.get("unit_cost") or None,
-                            "kpi_notes": li.get("kpi_notes", ""),
-                            "unit_value": li.get("unit_value") or None,
-                            "age": li.get("age", ""),
-                            "gender": li.get("gender", ""),
-                            "geo_targeting": li.get("geo_targeting", ""),
-                        },
-                    )
+                # Ignore whatever number the frontend guessed — recompute the real
+                # next number server-side, inside this transaction, so it's always correct.
+                match = re.match(r'^(.*?)(\d+)$', raw_line_item_id)
+                prefix = match.group(1) if match else raw_line_item_id
+                line_item_id = generate_line_item_id(prefix)
+
+
+            
+                # Added by me
+                line_item = LineItem.objects.create(
+                    campaign=campaign,
+                    line_item_id=line_item_id,
+                    line_item_name=li.get("line_item_name"),
+                    ethnicity=li.get("ethnicity", []),
+                    start_date=parse_date(li.get("start_date")),
+                    end_date=parse_date(li.get("end_date")),
+                    ad_format=li.get("ad_format", []),
+                    impressions=li.get("impressions") or None,
+                    units=li.get("units") or None,
+                    ctr=li.get("ctr") or None,
+                    viewability=li.get("viewability") or None,
+                    vcr=li.get("vcr") or None,
+                    unit_cost=li.get("unit_cost") or None,
+                    kpi_notes=li.get("kpi_notes", ""),
+                    unit_value=li.get("unit_value") or None,
+                    age=li.get("age", ""),
+                    gender=li.get("gender", ""),
+                    geo_targeting=li.get("geo_targeting", ""),
                 )
+
+            
 
                 # Fix — two separate loops
 

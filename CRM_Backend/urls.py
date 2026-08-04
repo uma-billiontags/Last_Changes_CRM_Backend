@@ -12,6 +12,7 @@ urlpatterns = [
     path('campaigns/', include('campaigns.urls')),
     path('reports/', include('reports.urls')),  
     path('invoice/', include('invoice.urls')),
+    path('notifications/', include('notifications.urls')),
 ]
 
 if settings.DEBUG:

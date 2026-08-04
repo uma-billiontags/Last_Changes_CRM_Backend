@@ -512,6 +512,7 @@ DEPARTMENT_DASHBOARD_MAP = {
     "account manager": "account_manager",
     "creative ops": "creative_ops",
     "campaign ops": "campaign_ops",
+    "finance": "finance",
 }
 
 @csrf_exempt

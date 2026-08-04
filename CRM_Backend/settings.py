@@ -50,7 +50,9 @@ INSTALLED_APPS = [
     'tasks',
     'campaigns',
     'reports',
-    'invoice'
+    'invoice',
+    # Added by charu
+    'notifications',
 ]
 
 MIDDLEWARE = [
@@ -183,3 +185,6 @@ CELERY_BEAT_SCHEDULE = {
         "schedule": 300.0,  # seconds — every 5 minutes
     },
 }
+
+
+import notifications.firebase_config

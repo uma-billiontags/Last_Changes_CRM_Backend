@@ -260,8 +260,25 @@ def assign_task(request):
         deadline_hours=deadline_hours,
         due_at=due_at,
     )
+    
+    # ── Push notification to whoever just got assigned this task ──
+    from notifications.notification import send_notification_to_user
+    # send_notification_to_user(
+    #     user=assigned_to,
+    #     title="New task assigned",
+    #     body=f"Ticket {ticket_id} — {role.title} — due in {deadline_hours}h" if deadline_hours
+    #         else f"Ticket {ticket_id} — {role.title}",
+    # )
+    
+    send_notification_to_user(
+    user=assigned_to,
+    title=f"New task: {role.department.title}",
+    body=f"{ticket_id} · {role.title} · assigned by {assigned_by.username if assigned_by else 'System'}"
+         + (f" · due in {deadline_hours}h" if deadline_hours else ""),
+)
 
     return JsonResponse(TaskAssignmentSerializer(task).data, status=201)
+
 
 
 @csrf_exempt
