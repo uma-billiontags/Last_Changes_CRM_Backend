@@ -1370,6 +1370,15 @@ def publish_campaign_excel(request, ticket_id):
         excel_obj = CampaignExcel.objects.get(campaign__ticket_id=ticket_id, report_type=report_type)
     except CampaignExcel.DoesNotExist:
         return Response({"error": "Excel not found. Generate first."}, status=404)
+    
+    from campaigns.models import Campaign
+    try:
+        campaign = Campaign.objects.get(ticket_id=ticket_id)
+        if not campaign.report_published:
+            campaign.report_published = True
+            campaign.save(update_fields=["report_published"])
+    except Campaign.DoesNotExist:
+        pass
     excel_obj.publish_status = "published"
     excel_obj.needs_republish = False   # ADD
     excel_obj.save(update_fields=["publish_status", "needs_republish"])  

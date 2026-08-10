@@ -5,6 +5,8 @@ from django.views.decorators.http import require_GET, require_POST
 from categories.models import Department, Role, UserCredential
 from .models import TaskAssignment
 from .serializers import TaskAssignmentSerializer
+from campaigns.models import Campaign, Creative, ThirdPartyCreative
+from django.db.models import Q   # ← ADD near the top, with your other django.db.models imports
 
 
 @require_GET
@@ -280,23 +282,182 @@ def assign_task(request):
     return JsonResponse(TaskAssignmentSerializer(task).data, status=201)
 
 
+# tasks/queries.py  (add this)
+def get_active_task_count(user, exclude_ticket_id=None, exclude_task_type=None):
+    """
+    How many tickets this person currently holds that are still open (pending/in_progress).
+    Used to decide if they're 'busy' (>=3) or 'free' (<3).
+    """
+    qs = get_current_assignments_qs().filter(
+        assigned_to=user,
+        status__in=["pending", "in_progress"],
+    )
+    if exclude_ticket_id:
+        qs = qs.exclude(ticket_id=exclude_ticket_id, task_type=exclude_task_type)
+    return qs.count()
+
+
+# ==================================================================
+# SEQUENTIAL WORKFLOW PIPELINE (Creative Ops → Campaign Ops → Ad Ops)
+# ==================================================================
+import re
+from categories.models import Department, Role
+from .models import TaskAssignment, AutoAssignRotation
+
+AUTO_ASSIGN_DEADLINE_HOURS = 0.1667  # 10 minutes — TEMP, change here later
+
+# Ordered pipeline — this order IS the sequence in which stages run.
+# Stage 1 starts at campaign creation. Each later stage starts only when
+# the stage before it is marked complete.
+WORKFLOW_STAGES = [
+    ("Creative Ops", "Account Director"),
+    ("Campaign Ops", "Account Director"),
+    ("Ad Ops", "Account Director"),
+]
+
+
+def department_to_task_type(title: str) -> str:
+    """Mirrors the frontend's departmentToTaskType() exactly, so task_type
+    slugs match what All_Campaigns.tsx looks up in assignment history."""
+    slug = re.sub(r'[^a-z0-9]+', '_', title.strip().lower())
+    return slug.strip('_')
+
+
+def _build_next_stage_map():
+    """task_type -> (next_dept_title, next_role_title) for every stage
+    except the last one (Ad Ops has no 'next')."""
+    mapping = {}
+    for i in range(len(WORKFLOW_STAGES) - 1):
+        dept_title, _ = WORKFLOW_STAGES[i]
+        next_dept_title, next_role_title = WORKFLOW_STAGES[i + 1]
+        mapping[department_to_task_type(dept_title)] = (next_dept_title, next_role_title)
+    return mapping
+
+
+NEXT_STAGE_MAP = _build_next_stage_map()
+# → {"creative_ops": ("Campaign Ops", "Account Director"),
+#    "campaign_ops": ("Ad Ops", "Account Director")}
+
+
+def assign_stage(ticket_id, dept_title, role_title, notes=""):
+    """
+    Assigns ONE pipeline stage (department+role) to a ticket via round robin.
+    Never raises — misconfiguration or an all-busy team just skips, so it
+    can never block campaign creation or a completion call.
+    Returns the created TaskAssignment, or None if skipped.
+    """
+    try:
+        department = Department.objects.get(title=dept_title, is_active=True)
+        role = Role.objects.get(department=department, title=role_title, is_active=True)
+    except (Department.DoesNotExist, Role.DoesNotExist):
+        return None
+
+    task_type = department_to_task_type(dept_title)
+
+    if get_current_assignment(ticket_id, task_type):
+        return None  # already has an assignment for this stage — don't double-assign
+
+    rotation, _ = AutoAssignRotation.objects.get_or_create(department=department, role=role)
+
+    next_user = get_next_assignee(
+        role, rotation.last_assigned_user,
+        ticket_id=ticket_id, task_type=task_type,
+    )
+    if not next_user:
+        return None  # everyone in this role is at BUSY_THRESHOLD — leave unassigned
+
+    now = timezone.now()
+    task = TaskAssignment.objects.create(
+        ticket_id=ticket_id,
+        task_type=task_type,
+        department=department,
+        role=role,
+        assigned_to=next_user,
+        assigned_to_name=next_user.username,
+        assigned_by=None,  # system-triggered
+        status="pending",
+        deadline_hours=AUTO_ASSIGN_DEADLINE_HOURS,
+        due_at=now + timezone.timedelta(hours=AUTO_ASSIGN_DEADLINE_HOURS),
+        notes=notes or "Auto-assigned — round robin",
+    )
+
+    rotation.last_assigned_user = next_user
+    rotation.save(update_fields=["last_assigned_user", "updated_at"])
+
+    return task
+
+
+def auto_assign_campaign_tasks(ticket_id):
+    """Call this once, right after a Campaign is created and has a ticket_id.
+    Starts the pipeline at STAGE 1 ONLY (Creative Ops). Campaign Ops and
+    Ad Ops are no longer assigned here — they're auto-assigned by
+    advance_workflow() once the stage before them is completed."""
+    first_dept_title, first_role_title = WORKFLOW_STAGES[0]
+    assign_stage(
+        ticket_id, first_dept_title, first_role_title,
+        notes="Auto-assigned on campaign creation — stage 1 of pipeline",
+    )
+
+
+def advance_workflow(task):
+    """
+    Given a TaskAssignment that was just marked completed, checks whether
+    it's part of the sequential pipeline and — if so — auto-assigns the
+    next stage. No-op if this task_type isn't in the pipeline (e.g.
+    lead_handling), or if it's the final stage (Ad Ops).
+    """
+    next_stage = NEXT_STAGE_MAP.get(task.task_type)
+    if not next_stage:
+        return None
+
+    next_dept_title, next_role_title = next_stage
+    return assign_stage(
+        task.ticket_id, next_dept_title, next_role_title,
+        notes=f"Auto-assigned — previous stage ({task.task_type}) completed",
+    )
+# tasks/views.py
+def _creative_ids_missing(ticket_id):
+    """Returns True if any creative under this campaign's line items
+    still needs a creative_id filled in. Used to gate Creative Ops
+    'Mark Complete'."""
+
+    try:
+        campaign = Campaign.objects.get(ticket_id=ticket_id)
+    except Campaign.DoesNotExist:
+        return False  # no campaign found — don't block, something else is wrong
+
+    line_item_ids = campaign.line_items.values_list('id', flat=True)
+
+    missing_standard = Creative.objects.filter(
+        line_item_id__in=line_item_ids
+    ).filter(Q(creative_id__isnull=True) | Q(creative_id="")).exists()
+
+    missing_third_party = ThirdPartyCreative.objects.filter(
+        line_item_id__in=line_item_ids
+    ).filter(Q(creative_id__isnull=True) | Q(creative_id="")).exists()
+
+    return missing_standard or missing_third_party
 
 @csrf_exempt
 @require_POST
 def mark_task_complete(request, task_id):
-    """
-    POST /tasks/mark_task_complete/<task_id>/
-    Marks the CURRENT row completed in place — completion is a terminal state,
-    not a reassignment, so it doesn't need a new history row.
-    """
     try:
         task = TaskAssignment.objects.get(pk=task_id)
     except TaskAssignment.DoesNotExist:
         return JsonResponse({"error": "Task not found."}, status=404)
 
+    # ── Gate: Creative Ops can't complete until every creative has an ID ──
+    if task.task_type == "creative_ops" and _creative_ids_missing(task.ticket_id):
+        return JsonResponse({
+            "error": "Cannot mark complete — one or more creatives are missing a Creative ID.",
+            "reason": "missing_creative_ids",
+        }, status=400)
+
     task.status = "completed"
     task.completed_at = timezone.now()
     task.save(update_fields=["status", "completed_at", "updated_at"])
+
+    advance_workflow(task)
 
     return JsonResponse(TaskAssignmentSerializer(task).data, status=200)
 
@@ -370,20 +531,6 @@ def get_ticket_task_history(request, ticket_id):
     task_type = request.GET.get("task_type", "lead_handling")
     history = get_ticket_history(ticket_id, task_type)
     return JsonResponse(TaskAssignmentSerializer(history, many=True).data, safe=False)
-
-# tasks/queries.py  (add this)
-def get_active_task_count(user, exclude_ticket_id=None, exclude_task_type=None):
-    """
-    How many tickets this person currently holds that are still open (pending/in_progress).
-    Used to decide if they're 'busy' (>=3) or 'free' (<3).
-    """
-    qs = get_current_assignments_qs().filter(
-        assigned_to=user,
-        status__in=["pending", "in_progress"],
-    )
-    if exclude_ticket_id:
-        qs = qs.exclude(ticket_id=exclude_ticket_id, task_type=exclude_task_type)
-    return qs.count()
 
 
 @require_GET
@@ -497,67 +644,3 @@ def get_status_report(request):
         })
 
     return JsonResponse(data, safe=False)
-
-import re
-from django.utils import timezone
-from categories.models import Department, Role
-from .models import TaskAssignment, AutoAssignRotation
-
-AUTO_ASSIGN_DEADLINE_HOURS = 0.1667  # 10 minutes — TEMP, change here later
-
-AUTO_ASSIGN_CONFIG = {
-    "Campaign Ops": "Account Director",
-    "Creative Ops": "Account Director",
-    "Ad Ops": "Account Director",
-}
-
-def department_to_task_type(title: str) -> str:
-    """Mirrors the frontend's departmentToTaskType() exactly, so task_type
-    slugs match what All_Campaigns.tsx looks up in assignment history."""
-    slug = re.sub(r'[^a-z0-9]+', '_', title.strip().lower())
-    return slug.strip('_')
-
-
-def auto_assign_campaign_tasks(ticket_id):
-    """Call this once, right after a Campaign is created and has a ticket_id.
-    Auto-assigns Campaign Ops / Creative Ops / Ad Ops via round robin.
-    Never raises — a misconfigured role or an all-busy team just gets skipped,
-    so it can't block campaign creation."""
-    for dept_title, role_title in AUTO_ASSIGN_CONFIG.items():
-        try:
-            department = Department.objects.get(title=dept_title, is_active=True)
-            role = Role.objects.get(department=department, title=role_title, is_active=True)
-        except (Department.DoesNotExist, Role.DoesNotExist):
-            continue
-
-        task_type = department_to_task_type(dept_title)
-
-        if get_current_assignment(ticket_id, task_type):
-            continue  # already has an assignment somehow — don't double-assign
-
-        rotation, _ = AutoAssignRotation.objects.get_or_create(department=department, role=role)
-
-        next_user = get_next_assignee(
-            role, rotation.last_assigned_user,
-            ticket_id=ticket_id, task_type=task_type,
-        )
-        if not next_user:
-            continue  # everyone in this role is at BUSY_THRESHOLD — leave unassigned
-
-        now = timezone.now()
-        TaskAssignment.objects.create(
-            ticket_id=ticket_id,
-            task_type=task_type,
-            department=department,
-            role=role,
-            assigned_to=next_user,
-            assigned_to_name=next_user.username,
-            assigned_by=None,  # system-triggered, like the overdue sweep
-            status="pending",
-            deadline_hours=AUTO_ASSIGN_DEADLINE_HOURS,
-            due_at=now + timezone.timedelta(hours=AUTO_ASSIGN_DEADLINE_HOURS),
-            notes="Auto-assigned on campaign creation — round robin",
-        )
-
-        rotation.last_assigned_user = next_user
-        rotation.save(update_fields=["last_assigned_user", "updated_at"])

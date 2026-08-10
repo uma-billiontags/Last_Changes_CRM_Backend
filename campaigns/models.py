@@ -48,6 +48,17 @@ class Campaign(models.Model):
     end_date = models.DateField()
 
     notes = models.TextField(blank=True, null=True)
+    
+    report_published = models.BooleanField(default=False)
+    # Today date (7/8/2026)
+    status = models.CharField(
+        max_length=20,
+        choices=[
+            ('pending', 'Pending'),
+            ('live', 'Live'),
+        ],
+        default='pending',
+    )
 
     created_at = models.DateTimeField(auto_now_add=True)
 

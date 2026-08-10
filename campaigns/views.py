@@ -202,6 +202,59 @@ def download_creative(request, creative_id):
     )
 
 
+# Today date (7/08/26)
+@api_view(["PATCH"])
+def update_creative_id(request):
+    creative_type = request.data.get("type")  # 'standard' or 'third_party'
+    creative_db_id = request.data.get("id")   # DB primary key (integer)
+    creative_id_value = request.data.get("creative_id", "").strip()
+
+    if not creative_db_id or not creative_type:
+        return Response({"error": "id and type are required"}, status=400)
+
+    try:
+        if creative_type == "standard":
+            obj = Creative.objects.get(id=creative_db_id)
+            obj.creative_id = creative_id_value
+            obj.save()
+            return Response(
+                {
+                    "message": "Creative ID Added Successfully",
+                    "id": obj.id,
+                    "creative_id": obj.creative_id,
+                },
+                status=200,
+            )
+
+        elif creative_type == "third_party":
+            obj = ThirdPartyCreative.objects.get(id=creative_db_id)
+            obj.creative_id = creative_id_value
+            obj.save()
+            return Response(
+                {
+                    "message": "Creative ID Added Successfully",
+                    "id": obj.id,
+                    "creative_id": obj.creative_id,
+                },
+                status=200,
+            )
+
+        else:
+            return Response(
+                {"error": "Invalid type. Use 'standard' or 'third_party'"}, status=400
+            )
+
+    except (Creative.DoesNotExist, ThirdPartyCreative.DoesNotExist):
+        return Response({"error": "Creative not found"}, status=404)
+    except Exception as e:
+        return Response({"error": str(e)}, status=500)
+
+
+
+
+
+
+
 # Third party function
 @api_view(["GET"])
 def download_thirdparty(request, thirdparty_id):
@@ -358,3 +411,19 @@ def io_send_email(request, ticket_id):
         return JsonResponse({"status": False, "message": f"Failed to send email: {e}"})
 
     return JsonResponse({"status": True, "message": f"Email sent to {', '.join(to_emails)}"})
+
+# campaigns/views.py
+@api_view(["POST"])
+def publish_campaign_report(request, ticket_id):
+    campaign = get_object_or_404(Campaign, ticket_id=ticket_id)
+    campaign.report_published = True
+    campaign.save(update_fields=["report_published"])
+    return Response({"message": "Report published", "ticket_id": ticket_id}, status=200)
+
+# campaigns/views.py
+@api_view(["POST"])
+def mark_campaign_live(request, ticket_id):
+    campaign = get_object_or_404(Campaign, ticket_id=ticket_id)
+    campaign.status = "live"
+    campaign.save(update_fields=["status"])
+    return Response({"message": "Campaign marked live", "ticket_id": ticket_id}, status=200)
